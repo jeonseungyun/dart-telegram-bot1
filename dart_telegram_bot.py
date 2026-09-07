@@ -68,6 +68,19 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
 # 며칠 전 공시까지 조회할지 (당일 실행이 실패했을 때를 대비해 여유를 둠).
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "2"))
 
+# 공시 "제목"에 이 키워드들 중 하나라도 포함되면 알림을 보내지 않고 건너뜁니다.
+# 증권사가 거의 매일 형식적으로 내는 ELB/ELS 등 파생결합증권 발행 관련 공시처럼,
+# 투자 판단에 의미 없는 반복성 공시를 걸러내기 위한 용도입니다.
+# 쉼표(,)로 구분해서 원하는 키워드를 자유롭게 추가/삭제할 수 있습니다.
+DEFAULT_EXCLUDE_KEYWORDS = (
+    "증권발행실적보고서,일괄신고추가서류,일괄신고서,효력발생안내,"
+    "파생결합증권,파생결합사채,ELB,ELS,DLS,DLB"
+)
+EXCLUDE_KEYWORDS = [
+    kw.strip() for kw in os.environ.get("EXCLUDE_KEYWORDS", DEFAULT_EXCLUDE_KEYWORDS).split(",")
+    if kw.strip()
+]
+
 # 공시 원문 중 Claude 에게 보낼 최대 글자 수 (너무 길면 비용/속도 문제가 생기므로 자름).
 MAX_DOC_CHARS = int(os.environ.get("MAX_DOC_CHARS", "8000"))
 
@@ -367,6 +380,16 @@ def main() -> None:
     # 전체 공시 중에서 우리 관심 기업(corp_code)에 해당하는 것만 골라낸다.
     filings = [f for f in all_filings if f.get("corp_code") in watch_map]
     log(f"전체 {len(all_filings)}건 중 관심 기업 공시 {len(filings)}건 발견.")
+
+    # 증권사의 ELB/ELS 발행 등, 투자 판단에 의미 없는 반복성 공시 제목은 걸러낸다.
+    before_exclude_count = len(filings)
+    filings = [
+        f for f in filings
+        if not any(kw in f.get("report_nm", "") for kw in EXCLUDE_KEYWORDS)
+    ]
+    excluded_count = before_exclude_count - len(filings)
+    if excluded_count:
+        log(f"제외 키워드에 걸려 {excluded_count}건 필터링됨 (알림 대상 {len(filings)}건 남음).")
 
     # 오래된 것부터 순서대로 알림을 보내기 위해 rcept_dt/rcept_no 기준 정렬
     filings.sort(key=lambda f: (f.get("rcept_dt", ""), f.get("rcept_no", "")))
