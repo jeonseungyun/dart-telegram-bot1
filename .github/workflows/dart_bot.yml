@@ -1,0 +1,54 @@
+name: DART 공시 알림 봇
+
+on:
+  # 평일 09:00~19:00(한국시간) 사이 15분마다 실행됩니다.
+  # cron 은 UTC 기준이며, 한국시간(KST)은 UTC+9 이므로
+  # KST 09:00~19:00 은 UTC 00:00~10:00 입니다.
+  schedule:
+    - cron: "*/15 0-10 * * 1-5"
+  # Actions 탭에서 "Run workflow" 버튼으로 수동 실행도 가능합니다.
+  workflow_dispatch:
+
+# 같은 워크플로우가 겹쳐 실행되면서 state.json 커밋이 충돌하지 않도록 순서대로만 실행합니다.
+concurrency:
+  group: dart-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: write # state.json 변경 사항을 다시 커밋하기 위해 필요합니다.
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 라이브러리 설치
+        run: pip install -r requirements.txt
+
+      - name: 봇 실행
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WATCH_LIST: ${{ secrets.WATCH_LIST }}
+        run: python dart_telegram_bot.py
+
+      - name: state.json 변경사항 커밋
+        run: |
+          git config user.name "dart-bot"
+          git config user.email "dart-bot@users.noreply.github.com"
+          if ! git diff --quiet -- state.json; then
+            git add state.json
+            git commit -m "chore: update state.json [skip ci]"
+            git push
+          else
+            echo "state.json 변경 없음 (새 공시 없음)"
+          fi
