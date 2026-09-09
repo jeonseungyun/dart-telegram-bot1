@@ -74,7 +74,8 @@ LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "2"))
 # 쉼표(,)로 구분해서 원하는 키워드를 자유롭게 추가/삭제할 수 있습니다.
 DEFAULT_EXCLUDE_KEYWORDS = (
     "증권발행실적보고서,일괄신고추가서류,일괄신고서,효력발생안내,"
-    "파생결합증권,파생결합사채,ELB,ELS,DLS,DLB"
+    "파생결합증권,파생결합사채,ELB,ELS,DLS,DLB,"
+    "IR개최,IR설명회,기업설명회"
 )
 EXCLUDE_KEYWORDS = [
     kw.strip() for kw in os.environ.get("EXCLUDE_KEYWORDS", DEFAULT_EXCLUDE_KEYWORDS).split(",")
