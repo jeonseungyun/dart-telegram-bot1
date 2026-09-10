@@ -46,7 +46,10 @@ jobs:
         run: |
           git config user.name "news-bot"
           git config user.email "news-bot@users.noreply.github.com"
-          if ! git diff --quiet -- news_state.json; then
+          # git diff 는 "한 번도 커밋된 적 없는 새 파일"은 변경으로 인식하지 못하므로
+          # (특히 news_state.json 최초 생성 시 문제), git status --porcelain 으로
+          # 새 파일/수정된 파일을 모두 정확히 감지합니다.
+          if [ -n "$(git status --porcelain -- news_state.json)" ]; then
             git add news_state.json
             git commit -m "chore: update news_state.json [skip ci]"
             git push
