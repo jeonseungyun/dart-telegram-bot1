@@ -1,0 +1,55 @@
+name: 관심 기업 뉴스 알림 봇
+
+on:
+  # 평일 09:00~19:00(한국시간) 사이 매시간 정각에 실행됩니다.
+  # 기업마다 구글 뉴스를 따로 조회해야 해서 dart_bot.yml 보다 시간이 오래 걸리므로,
+  # 15분마다가 아니라 1시간마다로 더 느긋하게 잡았습니다.
+  # cron 은 UTC 기준이며, 한국시간(KST)은 UTC+9 이므로 KST 09:00~19:00 은 UTC 00:00~10:00 입니다.
+  schedule:
+    - cron: "0 0-10 * * 1-5"
+  # Actions 탭에서 "Run workflow" 버튼으로 수동 실행도 가능합니다.
+  workflow_dispatch:
+
+# 같은 워크플로우가 겹쳐 실행되면서 news_state.json 커밋이 충돌하지 않도록 순서대로만 실행합니다.
+concurrency:
+  group: news-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: write # news_state.json 변경 사항을 다시 커밋하기 위해 필요합니다.
+
+jobs:
+  run-news-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 라이브러리 설치
+        run: pip install -r requirements.txt
+
+      - name: 뉴스 봇 실행
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WATCH_LIST: ${{ secrets.WATCH_LIST }}
+        run: python news_telegram_bot.py
+
+      - name: news_state.json 변경사항 커밋
+        run: |
+          git config user.name "news-bot"
+          git config user.email "news-bot@users.noreply.github.com"
+          if ! git diff --quiet -- news_state.json; then
+            git add news_state.json
+            git commit -m "chore: update news_state.json [skip ci]"
+            git push
+          else
+            echo "news_state.json 변경 없음 (새 뉴스 없음)"
+          fi
