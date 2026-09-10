@@ -20,8 +20,9 @@
 4. 키워드를 통과한 뉴스는 기사 링크에 실제로 접속해서 본문 텍스트를 추출한다
    (trafilatura 라이브러리 사용). 언론사마다 페이지 구조가 달라서 가끔 실패할 수 있는데,
    실패하면 본문 없이 "제목만" 가지고 판단하는 방식으로 자동 후퇴한다.
-5. Claude에게 "이 뉴스가 텔레그램으로 알릴 만큼 중요한지, 호재/악재/중립인지, 2~3줄
-   요약"을 판단시키고, "중요하다"고 판단한 것만 Telegram으로 전송한다.
+5. Claude에게 "이 뉴스가 텔레그램으로 알릴 만큼 중요한지, 호재/악재/중립인지"를 판단시키고,
+   "중요하다"고 판단한 것만 핵심 한 줄/상세 내용/배경·맥락/시장 시사점/한 줄 요약/해시태그로
+   구성된 카드 형태로 Telegram에 전송한다.
 6. 처리한 뉴스 링크를 news_state.json 에 추가로 저장해서 중복 알림을 막는다.
 
 dart_telegram_bot.py 와는 완전히 독립적으로 동작하는 별도 스크립트입니다.
@@ -35,6 +36,7 @@ import json
 import time
 import argparse
 import datetime
+import email.utils as eut
 import urllib.parse
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -65,6 +67,8 @@ except ImportError:
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+# 여러 명에게 동시에 보내고 싶으면 쉼표(,)로 구분해서 여러 chat_id 를 적으면 됩니다.
+TELEGRAM_CHAT_IDS = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
 
 # dart_telegram_bot.py 와 동일한 WATCH_LIST 를 그대로 재사용합니다.
 WATCH_LIST_RAW = os.environ.get("WATCH_LIST", "[]")
@@ -244,23 +248,34 @@ def build_news_prompt(corp_name: str, title: str, source: str, article_text: str
 판단하세요. 단순 시황 요약, 증시 전반 뉴스, 광고성 기사, 너무 일반적이거나 모호한 내용은
 알릴 필요가 없다고 판단하세요.
 
-다음 형식의 JSON 으로만 답변하세요. 다른 설명이나 코드블록 표시(```) 없이 순수 JSON
-객체만 출력합니다.
+notify 가 true 라면, 아래 필드를 채워서 뉴스 요약 카드를 작성합니다. 다음 형식의 JSON
+으로만 답변하세요. 다른 설명이나 코드블록 표시(```) 없이 순수 JSON 객체만 출력합니다.
 
 {{
   "notify": true 또는 false,
   "sentiment": "호재" 또는 "악재" 또는 "중립" 중 하나,
-  "summary": ["핵심 요약 1", "핵심 요약 2"],
+  "core_points": ["핵심 한 줄 1", "핵심 한 줄 2"],
+  "details": ["상세 내용 1", "상세 내용 2"],
+  "background": ["배경/맥락 1"],
+  "implications": ["시장 시사점 1"],
+  "one_line_summary": "전체 내용을 한 문장으로 요약",
+  "hashtags": ["관련기업명", "관련섹터"],
   "reason": "notify 를 그렇게 판단한 이유를 1문장으로"
 }}
 
 주의사항:
-- summary 는 기사 본문이 있으면 본문 기준으로, 없으면 제목 기준으로 핵심만 2개 항목,
-  각 항목은 한 문장 이내로 짧게 작성하세요.
+- notify 가 false 면 나머지 필드는 빈 배열/빈 문자열로 둬도 됩니다.
+- core_points 는 1~3개, details 는 2~4개, background 는 0~3개(해당 없으면 빈 배열),
+  implications 는 1~3개로 작성하세요. 각 항목은 한두 문장 이내로 짧게 씁니다.
+- background/implications 는 기사에 명시되지 않은 내용을 추론해서 쓰는 부분입니다.
+  단정적으로 쓰지 말고 "~로 해석됩니다", "~로 보입니다", "~일 가능성이 있습니다" 처럼
+  추정/해석임이 드러나게 쓰세요. 확실하지 않은 전망을 기사에 나온 사실처럼 단정하지
+  마세요.
+- hashtags 는 #없이 3~5개, 기업명/섹터/이벤트 종류 위주로 작성하세요.
 - 판단이 애매하면 notify 를 false 로 하세요 (놓치는 것보다, 애매한 걸 너무 많이 보내서
   알림이 스팸처럼 되는 게 더 나쁩니다).
 - 계약/수주, 실적(어닝서프라이즈/쇼크), 인수합병, 소송/제재, 리콜/사고, 경영진 변화,
-  신용등급 변경, 대규모 투자/증설 등 구체적 이벤트는 notify: true 로 하세요.
+  신용등급 변경, 대규모 투자/증설, IPO/상장 등 구체적 이벤트는 notify: true 로 하세요.
 """
 
 
@@ -268,7 +283,7 @@ def judge_news_with_claude(client, corp_name: str, title: str, source: str, arti
     prompt = build_news_prompt(corp_name, title, source, article_text)
     message = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=400,
+        max_tokens=800,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = "".join(block.text for block in message.content if block.type == "text").strip()
@@ -281,51 +296,133 @@ def judge_news_with_claude(client, corp_name: str, title: str, source: str, arti
         data = json.loads(raw)
     except json.JSONDecodeError:
         log(f"Claude 응답을 JSON으로 해석하지 못했습니다. 원본 응답:\n{raw}")
-        data = {"notify": False, "sentiment": "중립", "summary": [title], "reason": "응답 형식 오류"}
+        data = {"notify": False, "sentiment": "중립", "core_points": [title], "reason": "응답 형식 오류"}
 
     data.setdefault("notify", False)
     data.setdefault("sentiment", "중립")
-    data.setdefault("summary", [title])
+    data.setdefault("core_points", [title])
+    data.setdefault("details", [])
+    data.setdefault("background", [])
+    data.setdefault("implications", [])
+    data.setdefault("one_line_summary", title)
+    data.setdefault("hashtags", [])
     data.setdefault("reason", "")
     return data
 
 
+def format_pub_date(pub_date_raw: str) -> str:
+    """RSS pubDate(RFC822) 문자열을 '2026.09.08' 형태로 바꾼다. 해석 실패 시 원본을 그대로 반환한다."""
+    if not pub_date_raw:
+        return ""
+    try:
+        dt = eut.parsedate_to_datetime(pub_date_raw)
+        return dt.strftime("%Y.%m.%d")
+    except (TypeError, ValueError):
+        return pub_date_raw
+
+
 SENTIMENT_EMOJI = {"호재": "🟢", "악재": "🔴", "중립": "⚪"}
+SECTION_DIVIDER = "──────────"
+CIRCLED_NUMBERS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧"]
 
 
-def format_telegram_message(corp_name: str, title: str, source: str, link: str, analysis: dict) -> str:
-    emoji = SENTIMENT_EMOJI.get(analysis.get("sentiment"), "⚪")
-    summary_lines = analysis.get("summary") or []
-    summary_text = "\n".join(f"• {line}" for line in summary_lines)
+def format_telegram_message(
+    corp_name: str, title: str, source: str, pub_date_raw: str, link: str, analysis: dict
+) -> str:
+    """THE GURU 류의 텔레그램 뉴스 채널 형식(핵심 한 줄 -> 상세 내용 -> 배경·맥락 ->
+    시장 시사점 -> 한 줄 요약 -> 해시태그)을 흉내낸 카드 형태로 메시지를 구성한다."""
 
     def esc(s: str) -> str:
         return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    text = (
-        f"{emoji} <b>[뉴스/{esc(analysis.get('sentiment', '중립'))}]</b> {esc(corp_name)}\n"
-        f"<b>{esc(title)}</b>\n"
-        f"출처: {esc(source) or '알수없음'}\n\n"
-        f"{esc(summary_text)}\n\n"
-        f"판단 근거: {esc(analysis.get('reason', ''))}\n\n"
-        f'<a href="{link}">기사 보기</a>'
-    )
-    return text
+    def numbered_block(items: list) -> str:
+        lines = []
+        for i, item in enumerate(items):
+            mark = CIRCLED_NUMBERS[i] if i < len(CIRCLED_NUMBERS) else f"{i + 1}."
+            lines.append(f"{mark} {esc(item)}")
+        return "\n".join(lines)
+
+    sentiment = analysis.get("sentiment", "중립")
+    emoji = SENTIMENT_EMOJI.get(sentiment, "⚪")
+    pub_date = format_pub_date(pub_date_raw)
+
+    core_points = [p for p in (analysis.get("core_points") or []) if p]
+    details = [p for p in (analysis.get("details") or []) if p]
+    background = [p for p in (analysis.get("background") or []) if p]
+    implications = [p for p in (analysis.get("implications") or []) if p]
+    one_line_summary = analysis.get("one_line_summary", "")
+
+    meta_bits = [f"관심기업: {esc(corp_name)}"]
+    source_bit = esc(source) or "알수없음"
+    meta_bits.append(f"{source_bit} / {pub_date}" if pub_date else source_bit)
+
+    parts = [
+        f"{emoji} <b>[뉴스/{esc(sentiment)}]</b> {esc(title)}",
+        " | ".join(meta_bits),
+        SECTION_DIVIDER,
+    ]
+
+    if core_points:
+        parts.append(f"<b>1. 핵심 한 줄</b>\n{numbered_block(core_points)}")
+        parts.append(SECTION_DIVIDER)
+    if details:
+        parts.append(f"<b>2. 상세 내용</b>\n{numbered_block(details)}")
+        parts.append(SECTION_DIVIDER)
+    if background:
+        parts.append(f"<b>3. 배경·맥락</b>\n{numbered_block(background)}")
+        parts.append(SECTION_DIVIDER)
+    if implications:
+        parts.append(f"<b>4. 시장 시사점</b> <i>(AI 추정, 참고용)</i>\n{numbered_block(implications)}")
+        parts.append(SECTION_DIVIDER)
+    if one_line_summary:
+        parts.append(f"<b>5. 한 줄 요약</b>\n{esc(one_line_summary)}")
+        parts.append(SECTION_DIVIDER)
+
+    # 해시태그: 관심기업 이름은 항상 포함시키고, Claude가 준 태그를 이어붙인다 (중복 제거).
+    tag_seen = set()
+    tag_line_parts = []
+    for raw_tag in [corp_name] + list(analysis.get("hashtags") or []):
+        clean = re.sub(r"\s+", "", raw_tag or "")
+        if clean and clean not in tag_seen:
+            tag_seen.add(clean)
+            tag_line_parts.append(f"#{esc(clean)}")
+    if tag_line_parts:
+        parts.append(" ".join(tag_line_parts))
+
+    parts.append(f'<a href="{link}">원문 보기</a>')
+
+    return "\n".join(parts)
 
 
 def send_telegram_message(text: str) -> None:
     url = TELEGRAM_SEND_URL.format(token=TELEGRAM_BOT_TOKEN)
     if len(text) > 4000:
         text = text[:4000] + "\n\n...(생략됨)"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    resp = requests.post(url, data=payload, timeout=20)
-    if resp.status_code != 200:
-        log(f"텔레그램 전송 실패: {resp.status_code} {resp.text}")
-    resp.raise_for_status()
+
+    # TELEGRAM_CHAT_ID 에 여러 명(쉼표 구분)이 등록되어 있으면 각각에게 따로 전송한다.
+    # 한 명한테 실패해도(예: 그 사람이 봇과 대화를 시작 안 한 경우) 다른 사람에게는
+    # 계속 보내고, 전원에게 다 실패했을 때만 예외를 발생시켜 재시도되게 한다.
+    last_error = None
+    success_count = 0
+    for chat_id in TELEGRAM_CHAT_IDS:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            resp = requests.post(url, data=payload, timeout=20)
+            if resp.status_code != 200:
+                log(f"텔레그램 전송 실패 (chat_id={chat_id}): {resp.status_code} {resp.text}")
+            resp.raise_for_status()
+            success_count += 1
+        except requests.RequestException as e:
+            log(f"텔레그램 전송 실패 (chat_id={chat_id}): {e}")
+            last_error = e
+
+    if success_count == 0 and last_error is not None:
+        raise last_error
 
 
 def run_test_message() -> None:
@@ -396,7 +493,9 @@ def main() -> None:
                 continue
 
             if analysis.get("notify"):
-                message = format_telegram_message(corp_name, title, news["source"], link, analysis)
+                message = format_telegram_message(
+                    corp_name, title, news["source"], news["pubDate"], link, analysis
+                )
                 try:
                     send_telegram_message(message)
                 except requests.RequestException as e:
