@@ -1,0 +1,41 @@
+name: 환율 민감도 일괄 확인 (수동 실행)
+
+on:
+  # 정해진 시간에 자동으로 도는 게 아니라, Actions 탭에서 "Run workflow" 버튼을
+  # 눌렀을 때만 실행됩니다. 사업보고서는 1년에 한 번만 나오므로 매일/매시간 돌
+  # 필요가 없습니다 (필요할 때 수동으로 실행하세요).
+  workflow_dispatch:
+
+permissions:
+  contents: read # 이 워크플로우는 저장소에 아무것도 커밋하지 않습니다 (결과는 Artifact로 다운로드).
+
+jobs:
+  check-fx-sensitivity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90 # 관심 기업이 많으면(예: 350개) 수십 분 걸릴 수 있어 넉넉하게 설정
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 라이브러리 설치
+        run: pip install -r requirements.txt
+
+      - name: 환율 민감도 조회 실행
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WATCH_LIST: ${{ secrets.WATCH_LIST }}
+        run: python check_fx_sensitivity.py
+
+      - name: 결과 파일(엑셀) 업로드
+        if: always() # 중간에 실패해도 그때까지 처리된 결과는 다운로드할 수 있게 함
+        uses: actions/upload-artifact@v4
+        with:
+          name: fx-sensitivity-report
+          path: fx_sensitivity_report.xlsx
+          retention-days: 30
