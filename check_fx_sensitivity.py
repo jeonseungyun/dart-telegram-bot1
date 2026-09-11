@@ -25,9 +25,10 @@ DART OpenAPI에는 "환율 민감도"를 바로 돌려주는 API가 없습니다
    문서 맨 뒤쪽에 있기 때문입니다).
 3. 전체 텍스트에서 "환율" + "민감도"(또는 "위험관리") 가 가까이 나오는
    부분을 정규식으로 찾아냅니다. 가장 최근 보고서가 분기/반기보고서였는데
-   여기서 못 찾았다면, 분기/반기보고서는 주석이 간략해서 원래 없을 수도
-   있으므로 가장 최근 사업보고서로 한 번 더 확인합니다(사업보고서가 보통
-   주석이 제일 상세합니다).
+   여기서 "구체적인 수치"를 못 찾았다면(아예 없거나, 서술만 있거나), 분기/
+   반기보고서는 주석이 간략해서 수치 표가 빠져 있을 수 있으므로 가장 최근
+   사업보고서로 한 번 더 확인해서 더 구체적인 쪽을 사용합니다(사업보고서가
+   보통 주석이 제일 상세합니다).
 4. 찾은 부분(발췌문)만 Claude에게 보내서 "환율 10% 변동 시 영향 ○○억원"
    같은 핵심 수치를 한두 문장으로 뽑아달라고 요청합니다 (문서 전체가 아니라
    발췌문만 보내므로 비용이 크지 않습니다).
@@ -279,9 +280,11 @@ def check_company(client, corp_name: str, corp_code: str) -> dict:
     """이 회사의 환율 민감도를 확인한다.
 
     전략: 사업/반기/분기보고서 중 "가장 최근에 접수된 것"을 먼저 확인한다. 거기서
-    못 찾았고, 그게 사업보고서가 아니었다면(=분기/반기보고서였다면), 혹시 사업보고서
-    쪽에는 있을 수 있으니 가장 최근 사업보고서로 한 번 더 확인한다 (사업보고서가
-    보통 주석이 제일 상세하기 때문). 두 시도 모두 실패하면 "없음"으로 기록한다.
+    "구체적인 수치"(높음 등급)를 못 찾았고, 그게 사업보고서가 아니었다면(=분기/
+    반기보고서였다면), 혹시 사업보고서 쪽에는 더 구체적인 수치가 있을 수 있으니
+    가장 최근 사업보고서로 한 번 더 확인하고 둘 중 더 나은 쪽을 사용한다
+    (사업보고서가 보통 주석이 제일 상세하기 때문). 두 시도 모두 실패하면
+    "없음"으로 기록한다.
     """
     try:
         candidates = find_periodic_reports(corp_code)
@@ -298,18 +301,24 @@ def check_company(client, corp_name: str, corp_code: str) -> dict:
     excerpt, confidence = find_fx_sensitivity_excerpt(full_text)
     fallback_note = ""
 
-    if not excerpt and "사업보고서" not in latest.get("report_nm", ""):
-        # 가장 최근 보고서가 분기/반기보고서인데 못 찾았다면, 가장 최근 사업보고서로 재시도.
+    # "구체적 수치(높음)"를 못 찾은 경우엔 - 아예 아무것도 못 찾았든(없음),
+    # 서술만 있었든(낮음) - 사업보고서 쪽에 더 구체적인 내용이 있는지 반드시
+    # 한 번 더 확인한다. 분기/반기보고서는 주석이 간략해서 "위험관리"/"환율"
+    # 같은 단어는 나오지만 실제 수치 표는 없는 경우가 흔하기 때문이다.
+    # (예전 코드는 "아예 못 찾았을 때만" 사업보고서를 재확인해서, 반기보고서에서
+    # 서술만 발견되면 사업보고서의 진짜 수치 표를 놓치는 문제가 있었다.)
+    CONFIDENCE_RANK = {"높음": 2, "낮음": 1, "없음": 0}
+    if confidence != "높음" and "사업보고서" not in latest.get("report_nm", ""):
         annual_candidates = [c for c in candidates if "사업보고서" in c.get("report_nm", "")]
         if annual_candidates:
             annual_latest = annual_candidates[-1]
             time.sleep(0.3)
             annual_text = fetch_full_document_text(annual_latest.get("rcept_no", ""))
             annual_excerpt, annual_confidence = find_fx_sensitivity_excerpt(annual_text)
-            if annual_excerpt:
+            if annual_excerpt and CONFIDENCE_RANK.get(annual_confidence, 0) > CONFIDENCE_RANK.get(confidence, 0):
                 report_used = annual_latest
                 excerpt, confidence = annual_excerpt, annual_confidence
-                fallback_note = "(최신 분기/반기보고서엔 없어 최근 사업보고서 기준) "
+                fallback_note = "(최신 분기/반기보고서보다 사업보고서에 더 구체적인 내용이 있어 사업보고서 기준) "
 
     rcept_no = report_used.get("rcept_no", "")
     report_label = f"{report_used.get('report_nm', '')} · {report_used.get('rcept_dt', '')}"
