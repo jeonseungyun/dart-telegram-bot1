@@ -10,20 +10,24 @@
    최근 뉴스 제목/링크/출처를 가져온다. (기업별로 따로 조회해야 해서,
    기업 수가 많으면 dart_telegram_bot.py 보다 요청 횟수가 훨씬 많다.
    그래서 이 봇은 15분이 아니라 1시간 정도의 느긋한 주기로 실행하는 걸 권장한다.)
-2. news_state.json 에 저장된 "이미 처리한 뉴스 링크 목록"과 비교해서 새 뉴스만 골라낸다.
+   -> 검색어에 "when:1d" 를 붙여서 구글 쪽에서부터 최근 24시간 기사만 받아오고,
+      받아온 기사를 발행시각(pubDate) 최신순으로 정렬한 뒤 상위 NEWS_PER_COMPANY 개만 쓴다.
+      (구글 뉴스 검색 RSS 는 기본이 "관련도순"이라 옛날 기사가 섞여 나오기 때문)
+2. 날짜 필터: 기본값에서는 발행시각이 "최근 24시간 이내"인 기사만
+   통과시킨다 (NEWS_TODAY_ONLY=true 로 바꾸면 한국시간 오늘 기사만). 발행일을 알 수 없는 기사도 옛날 기사일 수 있으므로 건너뛴다.
+3. news_state.json 에 저장된 "이미 처리한 뉴스 링크 목록"과 비교해서 새 뉴스만 골라낸다.
    -> 처음 실행할 때는 그동안 쌓인 뉴스가 전부 "새 뉴스"로 인식되어 알림이 폭탄처럼
       쏟아질 수 있으므로, news_state.json 이 아예 없는 최초 실행은 "본 것으로만 기록"
-      하고 알림은 보내지 않는다 (--seed 모드가 자동으로 적용됨).
-3. 뉴스 제목에 NEWS_INCLUDE_KEYWORDS 중 하나도 없으면 Claude 호출 없이 건너뛴다
+      하고 알림은 보내지 않는다.
+4. 뉴스 제목에 NEWS_INCLUDE_KEYWORDS 중 하나도 없으면 Claude 호출 없이 건너뛴다
    (Claude API 비용을 줄이기 위한 1차 필터. 아무 키워드나 없어도 되게 하고 싶으면
    NEWS_INCLUDE_KEYWORDS="" 로 비워두면 모든 뉴스를 Claude에게 보낸다).
-4. 키워드를 통과한 뉴스는 기사 링크에 실제로 접속해서 본문 텍스트를 추출한다
-   (trafilatura 라이브러리 사용). 언론사마다 페이지 구조가 달라서 가끔 실패할 수 있는데,
-   실패하면 본문 없이 "제목만" 가지고 판단하는 방식으로 자동 후퇴한다.
-5. Claude에게 "이 뉴스가 텔레그램으로 알릴 만큼 중요한지, 호재/악재/중립인지"를 판단시키고,
-   "중요하다"고 판단한 것만 핵심 한 줄/상세 내용/배경·맥락/시장 시사점/한 줄 요약/해시태그로
-   구성된 카드 형태로 Telegram에 전송한다.
-6. 처리한 뉴스 링크를 news_state.json 에 추가로 저장해서 중복 알림을 막는다.
+5. 키워드를 통과한 뉴스는 기사 링크에 실제로 접속해서 본문 텍스트를 추출한다
+   (trafilatura 라이브러리 사용). 실패하면 "제목만" 가지고 판단한다.
+6. Claude에게 "이 뉴스가 텔레그램으로 알릴 만큼 중요한지, 호재/악재/중립인지"를 판단시키고,
+   "중요하다"고 판단한 것만 카드 형태로 Telegram에 전송한다.
+   (Claude 에게 오늘 날짜도 같이 알려줘서, 예전 사건을 다시 쓴 기사면 알리지 않게 한다.)
+7. 처리한 뉴스 링크를 news_state.json 에 추가로 저장해서 중복 알림을 막는다.
 
 dart_telegram_bot.py 와는 완전히 독립적으로 동작하는 별도 스크립트입니다.
 (따로 GitHub Actions 워크플로우로 실행하세요: .github/workflows/news_bot.yml)
@@ -79,8 +83,6 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
 NEWS_PER_COMPANY = int(os.environ.get("NEWS_PER_COMPANY", "5"))
 
 # 뉴스 "제목"에 이 키워드들 중 하나도 없으면 Claude 를 호출하지 않고 건너뜁니다.
-# (증시 잡담/시황 요약 같은 뉴스가 워낙 많아서, 회사에 실제로 의미 있는 이벤트로
-#  보이는 것만 1차로 걸러내는 용도. 비워두면 전부 Claude에게 보냅니다.)
 DEFAULT_NEWS_INCLUDE_KEYWORDS = (
     "실적,계약,수주,인수,합병,특허,소송,리콜,화재,파업,감사의견,상장폐지,매각,"
     "유상증자,무상증자,배당,자사주,대표이사,신용등급,목표가,투자,증설,파산,부도,"
@@ -96,6 +98,17 @@ NEWS_STATE_FILE = Path(os.environ.get("NEWS_STATE_FILE", "news_state.json"))
 # 기사 본문에서 Claude에게 보낼 최대 글자 수 (너무 길면 비용/속도 문제가 생기므로 자름).
 MAX_ARTICLE_CHARS = int(os.environ.get("MAX_ARTICLE_CHARS", "3000"))
 
+# ---- 날짜 필터 ----------------------------------------------------------------
+# true: 발행일이 "한국시간 기준 오늘"인 기사만 알림 대상.
+# false(기본): 발행시각이 NEWS_MAX_AGE_HOURS(기본 24)시간 이내인 기사만 알림 대상.
+NEWS_TODAY_ONLY = os.environ.get("NEWS_TODAY_ONLY", "false").strip().lower() in ("1", "true", "yes", "y")
+NEWS_MAX_AGE_HOURS = float(os.environ.get("NEWS_MAX_AGE_HOURS", "24"))
+# 구글 뉴스 검색어에 붙이는 기간 연산자. "1d" 면 최근 24시간, "12h" 면 최근 12시간.
+# 비우면 기간 연산자를 붙이지 않습니다.
+NEWS_SEARCH_WHEN = os.environ.get("NEWS_SEARCH_WHEN", "1d").strip()
+
+KST = datetime.timezone(datetime.timedelta(hours=9))
+
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
 TELEGRAM_SEND_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
@@ -109,7 +122,7 @@ REQUEST_HEADERS = {
 
 
 def log(msg: str) -> None:
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
 
@@ -153,12 +166,28 @@ def save_state(state: dict) -> None:
     NEWS_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def parse_pub_date(pub_date_raw: str):
+    """RSS pubDate(RFC822) -> timezone 이 붙은 datetime. 해석 실패 시 None."""
+    if not pub_date_raw:
+        return None
+    try:
+        dt = eut.parsedate_to_datetime(pub_date_raw)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
 def fetch_news_for_company(corp_name: str) -> list:
-    """기업명으로 구글 뉴스 RSS 를 검색해서 [{title, link, pubDate, source}, ...] 를 반환한다.
-    실패하면 빈 리스트를 반환한다 (한 기업 실패가 전체 실행을 막지 않도록)."""
-    # 회사명이 흔한 단어(예: "동서", "대상")인 경우 무관한 뉴스가 너무 많이 섞이는 걸
-    # 줄이기 위해 "주식"을 함께 검색어로 넣는다. 완벽하진 않지만 잡음을 꽤 줄여준다.
+    """기업명으로 구글 뉴스 RSS 를 검색해서 [{title, link, pubDate, source}, ...] 를
+    '최신순'으로 반환한다. 실패하면 빈 리스트를 반환한다."""
+    # 회사명이 흔한 단어(예: "동서", "대상")인 경우 무관한 뉴스가 섞이는 걸 줄이기 위해 "주식"을 붙인다.
     query = f"{corp_name} 주식"
+    if NEWS_SEARCH_WHEN:
+        query += f" when:{NEWS_SEARCH_WHEN}"
     params = {"q": query, "hl": "ko", "gl": "KR", "ceid": "KR:ko"}
     try:
         resp = requests.get(GOOGLE_NEWS_RSS_URL, params=params, headers=REQUEST_HEADERS, timeout=15)
@@ -174,22 +203,24 @@ def fetch_news_for_company(corp_name: str) -> list:
         return []
 
     items = []
-    for item in root.findall("./channel/item")[:NEWS_PER_COMPANY]:
+    # 구글 결과는 관련도순이라, 전부 받아서 발행시각 최신순으로 정렬한 뒤 상위 N개만 사용한다.
+    for item in root.findall("./channel/item"):
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
         pub_date = (item.findtext("pubDate") or "").strip()
         source_el = item.find("source")
         source = (source_el.text or "").strip() if source_el is not None else ""
 
-        # 구글 뉴스는 title 을 "실제 제목 - 언론사명" 형태로 붙여서 주는 경우가 많다.
-        # source 를 알고 있으면 끝에 붙은 " - 언론사명" 부분을 제목에서 떼어낸다.
+        # 구글 뉴스는 title 을 "실제 제목 - 언론사명" 형태로 주는 경우가 많아 끝부분을 떼어낸다.
         if source and title.endswith(f" - {source}"):
             title = title[: -(len(source) + 3)].strip()
 
         if title and link:
             items.append({"title": title, "link": link, "pubDate": pub_date, "source": source})
 
-    return items
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    items.sort(key=lambda x: parse_pub_date(x["pubDate"]) or epoch, reverse=True)
+    return items[:NEWS_PER_COMPANY]
 
 
 def should_check_with_claude(title: str) -> bool:
@@ -199,10 +230,7 @@ def should_check_with_claude(title: str) -> bool:
 
 
 def fetch_article_text(url: str) -> str:
-    """뉴스 링크에 접속해서 기사 본문 텍스트만 추출한다 (광고/메뉴/관련기사 등은 제외).
-    실패하면 빈 문자열을 반환한다 (이 경우 제목만으로 판단하는 방식으로 자동 후퇴).
-    구글 뉴스 링크는 실제 언론사 페이지로 리다이렉트되므로, requests 가 그 리다이렉트를
-    따라가서 최종 페이지의 HTML을 가져온다."""
+    """뉴스 링크에 접속해서 기사 본문 텍스트만 추출한다. 실패하면 빈 문자열."""
     if trafilatura is None:
         return ""
     try:
@@ -223,13 +251,21 @@ def fetch_article_text(url: str) -> str:
     return extracted[:MAX_ARTICLE_CHARS]
 
 
-def build_news_prompt(corp_name: str, title: str, source: str, article_text: str) -> str:
+def build_news_prompt(corp_name: str, title: str, source: str, pub_date_raw: str, article_text: str) -> str:
+    today_kst = datetime.datetime.now(KST).strftime("%Y-%m-%d")
+    pub_dt = parse_pub_date(pub_date_raw)
+    pub_str = pub_dt.astimezone(KST).strftime("%Y-%m-%d %H:%M") if pub_dt else "알수없음"
+
+    header = f"""기업명: {corp_name}
+뉴스 제목: {title}
+출처: {source or "알수없음"}
+발행시각(한국시간): {pub_str}
+오늘 날짜(한국시간): {today_kst}"""
+
     if article_text:
         content_part = f"""아래는 관심 기업과 관련된 뉴스 기사의 본문입니다.
 
-기업명: {corp_name}
-뉴스 제목: {title}
-출처: {source or "알수없음"}
+{header}
 
 --- 기사 본문 ---
 {article_text}
@@ -237,16 +273,15 @@ def build_news_prompt(corp_name: str, title: str, source: str, article_text: str
     else:
         content_part = f"""아래는 관심 기업과 관련된 뉴스입니다. (기사 본문을 가져오지 못해 제목만 있습니다.)
 
-기업명: {corp_name}
-뉴스 제목: {title}
-출처: {source or "알수없음"}"""
+{header}"""
 
     return f"""당신은 한국 주식시장에 정통한 애널리스트입니다.
 {content_part}
 
-이 뉴스가 투자자에게 텔레그램 알림으로 보낼 만큼 구체적이고 의미 있는 기업 이벤트인지
-판단하세요. 단순 시황 요약, 증시 전반 뉴스, 광고성 기사, 너무 일반적이거나 모호한 내용은
-알릴 필요가 없다고 판단하세요.
+이 뉴스가 투자자에게 텔레그램 알림으로 보낼 만큼 구체적이고 의미 있는 "오늘의 새로운" 기업
+이벤트인지 판단하세요. 단순 시황 요약, 증시 전반 뉴스, 광고성 기사, 너무 일반적이거나 모호한
+내용은 알릴 필요가 없다고 판단하세요. 또한 기사 속 사건이 오늘({today_kst}) 기준으로 며칠~몇 달
+전에 이미 알려진 일을 다시 정리한 기사(재탕/회고성 기사)라면 notify 를 false 로 하세요.
 
 notify 가 true 라면, 아래 필드를 채워서 뉴스 요약 카드를 작성합니다. 다음 형식의 JSON
 으로만 답변하세요. 다른 설명이나 코드블록 표시(```) 없이 순수 JSON 객체만 출력합니다.
@@ -268,22 +303,20 @@ notify 가 true 라면, 아래 필드를 채워서 뉴스 요약 카드를 작�
 - core_points 는 1~3개, details 는 2~4개, background 는 0~3개(해당 없으면 빈 배열),
   implications 는 1~3개로 작성하세요. 각 항목은 한두 문장 이내로 짧게 씁니다.
 - background/implications 는 기사에 명시되지 않은 내용을 추론해서 쓰는 부분입니다.
-  단정적으로 쓰지 말고 "~로 해석됩니다", "~로 보입니다", "~일 가능성이 있습니다" 처럼
-  추정/해석임이 드러나게 쓰세요. 확실하지 않은 전망을 기사에 나온 사실처럼 단정하지
-  마세요.
+  단정적으로 쓰지 말고 "~로 해석됩니다", "~로 보입니다" 처럼 추정임이 드러나게 쓰세요.
 - hashtags 는 #없이 3~5개, 기업명/섹터/이벤트 종류 위주로 작성하세요.
-- 판단이 애매하면 notify 를 false 로 하세요 (놓치는 것보다, 애매한 걸 너무 많이 보내서
-  알림이 스팸처럼 되는 게 더 나쁩니다).
+- 판단이 애매하면 notify 를 false 로 하세요.
 - 계약/수주, 실적(어닝서프라이즈/쇼크), 인수합병, 소송/제재, 리콜/사고, 경영진 변화,
   신용등급 변경, 대규모 투자/증설, IPO/상장 등 구체적 이벤트는 notify: true 로 하세요.
 """
 
 
-def judge_news_with_claude(client, corp_name: str, title: str, source: str, article_text: str = "") -> dict:
-    prompt = build_news_prompt(corp_name, title, source, article_text)
+def judge_news_with_claude(client, corp_name: str, title: str, source: str, pub_date_raw: str,
+                           article_text: str = "") -> dict:
+    prompt = build_news_prompt(corp_name, title, source, pub_date_raw, article_text)
     message = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=800,
+        max_tokens=1000,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = "".join(block.text for block in message.content if block.type == "text").strip()
@@ -311,14 +344,26 @@ def judge_news_with_claude(client, corp_name: str, title: str, source: str, arti
 
 
 def format_pub_date(pub_date_raw: str) -> str:
-    """RSS pubDate(RFC822) 문자열을 '2026.09.08' 형태로 바꾼다. 해석 실패 시 원본을 그대로 반환한다."""
-    if not pub_date_raw:
-        return ""
-    try:
-        dt = eut.parsedate_to_datetime(pub_date_raw)
-        return dt.strftime("%Y.%m.%d")
-    except (TypeError, ValueError):
-        return pub_date_raw
+    """RSS pubDate 를 한국시간 '2026.09.08 14:30' 형태로 바꾼다. 해석 실패 시 원본 반환."""
+    dt = parse_pub_date(pub_date_raw)
+    if dt is None:
+        return pub_date_raw or ""
+    return dt.astimezone(KST).strftime("%Y.%m.%d %H:%M")
+
+
+def is_news_stale(pub_date_raw: str, now=None) -> bool:
+    """알림 대상에서 빼야 하는 기사면 True.
+    - NEWS_TODAY_ONLY=true : 한국시간 기준 '오늘' 발행된 기사가 아니면 True
+    - NEWS_TODAY_ONLY=false: NEWS_MAX_AGE_HOURS 시간보다 오래된 기사면 True
+    - 발행일을 알 수 없는 기사는 옛날 기사일 수 있으므로 True (건너뜀)"""
+    dt = parse_pub_date(pub_date_raw)
+    if dt is None:
+        return True
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if NEWS_TODAY_ONLY:
+        return dt.astimezone(KST).date() != now.astimezone(KST).date()
+    age_hours = (now - dt).total_seconds() / 3600
+    return age_hours > NEWS_MAX_AGE_HOURS
 
 
 SENTIMENT_EMOJI = {"호재": "🟢", "악재": "🔴", "중립": "⚪"}
@@ -329,8 +374,7 @@ CIRCLED_NUMBERS = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧"]
 def format_telegram_message(
     corp_name: str, title: str, source: str, pub_date_raw: str, link: str, analysis: dict
 ) -> str:
-    """THE GURU 류의 텔레그램 뉴스 채널 형식(핵심 한 줄 -> 상세 내용 -> 배경·맥락 ->
-    시장 시사점 -> 한 줄 요약 -> 해시태그)을 흉내낸 카드 형태로 메시지를 구성한다."""
+    """핵심 한 줄 -> 상세 내용 -> 배경·맥락 -> 시장 시사점 -> 한 줄 요약 -> 해시태그 카드."""
 
     def esc(s: str) -> str:
         return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -378,7 +422,6 @@ def format_telegram_message(
         parts.append(f"<b>5. 한 줄 요약</b>\n{esc(one_line_summary)}")
         parts.append(SECTION_DIVIDER)
 
-    # 해시태그: 관심기업 이름은 항상 포함시키고, Claude가 준 태그를 이어붙인다 (중복 제거).
     tag_seen = set()
     tag_line_parts = []
     for raw_tag in [corp_name] + list(analysis.get("hashtags") or []):
@@ -399,9 +442,6 @@ def send_telegram_message(text: str) -> None:
     if len(text) > 4000:
         text = text[:4000] + "\n\n...(생략됨)"
 
-    # TELEGRAM_CHAT_ID 에 여러 명(쉼표 구분)이 등록되어 있으면 각각에게 따로 전송한다.
-    # 한 명한테 실패해도(예: 그 사람이 봇과 대화를 시작 안 한 경우) 다른 사람에게는
-    # 계속 보내고, 전원에게 다 실패했을 때만 예외를 발생시켜 재시도되게 한다.
     last_error = None
     success_count = 0
     for chat_id in TELEGRAM_CHAT_IDS:
@@ -445,7 +485,8 @@ def main() -> None:
         raise SystemExit("anthropic 패키지가 설치되지 않았습니다. pip install -r requirements.txt 를 실행하세요.")
 
     watchlist = load_watchlist()
-    log(f"관심 기업 {len(watchlist)}개 뉴스 감시 중.")
+    log(f"관심 기업 {len(watchlist)}개 뉴스 감시 중. "
+        f"(날짜 필터: {'한국시간 오늘 기사만' if NEWS_TODAY_ONLY else f'{NEWS_MAX_AGE_HOURS:g}시간 이내'})")
 
     state, is_first_run = load_state()
     seen = set(state.get("seen_links", []))
@@ -459,6 +500,7 @@ def main() -> None:
     new_count = 0
     checked_count = 0
     skipped_by_keyword = 0
+    skipped_by_stale_date = 0
 
     for item in watchlist:
         corp_name = item["name"]
@@ -470,15 +512,21 @@ def main() -> None:
             if link in seen:
                 continue
 
+            if is_news_stale(news["pubDate"]):
+                # 오늘 기사가 아님 -> 알림 없이 건너뛴다.
+                # (seen 에 넣지 않음: 넣으면 news_state.json 만 불필요하게 커집니다.
+                #  어차피 날짜가 지난 기사라 다음 실행에서도 똑같이 걸러집니다.)
+                skipped_by_stale_date += 1
+                continue
+
             if is_first_run:
-                # 최초 실행: 알림 없이 "본 것"으로만 기록
                 seen.add(link)
                 continue
 
             title = news["title"]
             if not should_check_with_claude(title):
                 skipped_by_keyword += 1
-                seen.add(link)  # 다시 안 보도록 기록은 남긴다
+                seen.add(link)
                 continue
 
             checked_count += 1
@@ -486,7 +534,9 @@ def main() -> None:
             if not article_text:
                 log(f"기사 본문을 가져오지 못해 제목만으로 판단합니다: {corp_name} - {title}")
             try:
-                analysis = judge_news_with_claude(client, corp_name, title, news["source"], article_text)
+                analysis = judge_news_with_claude(
+                    client, corp_name, title, news["source"], news["pubDate"], article_text
+                )
             except Exception as e:
                 log(f"Claude 판단 실패 ({corp_name} - {title}): {e}")
                 seen.add(link)
@@ -500,13 +550,15 @@ def main() -> None:
                     send_telegram_message(message)
                 except requests.RequestException as e:
                     log(f"텔레그램 전송 실패 ({corp_name} - {title}): {e} - 다음 실행에서 재시도합니다.")
-                    continue  # seen 에 추가하지 않아 다음 실행 때 재시도됨
+                    continue
                 new_count += 1
                 log(f"알림 전송: {corp_name} - {title}")
+            else:
+                log(f"알림 안 함 ({analysis.get('reason', '')}): {corp_name} - {title}")
 
             seen.add(link)
             state["seen_links"] = sorted(seen)
-            save_state(state)  # 하나 처리할 때마다 저장 (중간 실패에도 진행 상황 보존)
+            save_state(state)
 
     state["seen_links"] = sorted(seen)
     save_state(state)
@@ -516,7 +568,8 @@ def main() -> None:
             f"다음 실행부터 새 뉴스에 대해 알림이 갑니다.")
     else:
         log(f"완료. Claude로 판단한 뉴스 {checked_count}건 중 {new_count}건 알림 전송. "
-            f"키워드 필터로 건너뛴 뉴스 {skipped_by_keyword}건.")
+            f"키워드 필터로 건너뛴 뉴스 {skipped_by_keyword}건. "
+            f"기간이 지나 건너뛴 뉴스 {skipped_by_stale_date}건.")
 
 
 if __name__ == "__main__":
